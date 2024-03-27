@@ -1,5 +1,5 @@
 #include "config.h"
-//#include "image.h"
+#include <ArduinoBLE.h>
 
 TTGOClass *watch;
 TFT_eSPI *tft;
@@ -11,10 +11,11 @@ volatile bool irq = false; // Mark as volatile since it's used in interrupt cont
 //const unsigned int BCKGRDCOL = COLOR565(138, 235, 244);
 const unsigned int BCKGRDCOL = COLOR565(0, 0, 0);
 volatile uint32_t stepCount = 0; // Renamed from 'step' to avoid conflict
-double calories = 0;
+volatile double calories = 0;
 //long totalHikeTime = 0;
 //uint32_t previousStepCount = 0;
-unsigned long lastUpdateTime = 0, totalHikeTime=0;
+unsigned long lastUpdateTime = 0;
+volatile unsigned long totalHikeTime=0;
 const long updateInterval = 500; // Update interval in milliseconds
 const uint32_t DEBOUNCE_TIME = 50; // 50 milliseconds
 uint32_t lastTouchTime = 0;
@@ -24,10 +25,17 @@ uint32_t previousDistance = 0;
 long lastTime = 0, minutes = 0, hours = 0, distance = 0;
 //extern TFT_eSPI *tft;
 
-
+unsigned long previousMillis = 0;  // Variable to store the last time the message was sent
+const unsigned long interval = 1000; 
 char buf[128];
 bool rtcIrq = false;
 
+#define SERVICE_UUID           "4fafc201-1fb5-459e-8fcc-c5c9c331914b" // UART service UUID
+#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+BLEService uartService(SERVICE_UUID); // create service
+BLEStringCharacteristic rxCharacteristic(CHARACTERISTIC_UUID_RX, BLEWrite, 30);
+BLEStringCharacteristic txCharacteristic(CHARACTERISTIC_UUID_TX, BLENotify, 30);
 
 void setup() {
     Serial.begin(115200);
@@ -36,7 +44,36 @@ void setup() {
     watch->openBL();
     tft = watch->tft;
     sensor = watch->bma;
+    // begin initialization
+  if (!BLE.begin()) {
+    Serial.println("starting BLE failed!");
 
+    while (1);
+  }
+  
+  // set the local name peripheral advertises
+  BLE.setLocalName("BLE_peripheral_uart");
+  // set the UUID for the service this peripheral advertises
+  BLE.setAdvertisedService(uartService);
+
+  // add the characteristic to the service
+  uartService.addCharacteristic(rxCharacteristic);
+  uartService.addCharacteristic(txCharacteristic);
+
+  // add service
+  BLE.addService(uartService);
+
+  // assign event handlers for connected, disconnected to peripheral
+  BLE.setEventHandler(BLEConnected, blePeripheralConnectHandler);
+  BLE.setEventHandler(BLEDisconnected, blePeripheralDisconnectHandler);
+
+  // assign event handlers for characteristic
+  //rxCharacteristic.setEventHandler(BLEWritten, rxCharacteristicWritten);
+  // set an initial value for the characteristic
+  //rxCharacteristic.setValue("BLE_peripheral_uart");
+
+  // start advertising
+  BLE.advertise();
      // Accel parameter structure
     Acfg cfg;
     /*!
@@ -116,10 +153,17 @@ void setup() {
 }
 
 void loop() {
+  unsigned long currentMillis1 = millis();
+  if (currentMillis1 - previousMillis >= interval) {
+    // Save the last time the message was sent
+    previousMillis = currentMillis1;
 
-
-
-
+    // Send the message
+    String message = String(stepCount) + ";" + String(calories) + ";" + String(totalHikeTime) + ";" + String(stepCount / 1408);
+    txCharacteristic.setValue(message);
+  }
+  BLE.poll();
+  
     if (needsDisplayInit) {
         displayInit();
         needsDisplayInit = false; 
@@ -170,6 +214,7 @@ void loop() {
         // Handle "Reset" button touch
         else if (x >= resetX && x <= resetX + buttonWidth && y >= resetY && y <= resetY + buttonHeight) {
             resetSteps(); // Reset step count
+            totalHikeTime = 0;
             needsDisplayInit = true; // Indicate need to reinitialize display (e.g., to update UI)
         }
 
@@ -307,8 +352,8 @@ void handleInterrupt() {
 
 void resetSteps() {
     stepCount = 0;
-    calories = getCalories(true);
-    totalHikeTime = getTime(true);
+    calories = 0;
+    totalHikeTime = 0;
     sensor->resetStepCounter();
     // Update display immediately if needed or flag for update in the next loop iteration
     needsDisplayInit = true; // Flag to refresh the display
@@ -334,31 +379,14 @@ unsigned long getTime(bool x) {
   return x ? 0: millis() / (1000UL * 60UL);
 }
 
-
-
-//TFT_eSPI tft = TFT_eSPI();  // Create object "tft"
-
-/*
-void displayFullBackgroundImage() {
-    tft->fillScreen(TFT_BLACK);  // Clear the screen
-    
-    // Declare and initialize imageWidth and imageHeight with the dimensions of your image
-    int16_t imageWidth = 240; // Replace 240 with the actual width of your image
-    int16_t imageHeight = 320; // Replace 320 with the actual height of your image
-    
-    // Calculate x and y position to center the image on the screen
-    int16_t x = (tft->width() - imageWidth) / 2;
-    int16_t y = (tft->height() - imageHeight) / 2;
-    
-    // Draw the image on the screen
-    tft->pushImage(x, y, imageWidth, imageHeight, mountainImage); // Replace mountainImage with the actual name of your image array
-    
-    // Optional: Draw "Go Hike" text over the image
-    tft->setTextColor(TFT_WHITE); // White text
-    tft->setTextSize(2); // Large size text
-    tft->drawString("Go Hike :)", (tft->width() / 2) - (tft->textWidth("Go Hike :)") / 2), tft->height() / 2);
+void blePeripheralConnectHandler(BLEDevice central) {
+  // central connected event handler
+  Serial.print("Connected event, central: ");
+  Serial.println(central.address());
 }
-*/
 
-
-
+void blePeripheralDisconnectHandler(BLEDevice central) {
+  // central disconnected event handler
+  Serial.print("Disconnected event, central: ");
+  Serial.println(central.address());
+}
